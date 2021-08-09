@@ -17,14 +17,14 @@
 Run with `python3 setup.py sdist bdist_wheel`.
 """
 
-from distutils import spawn
+# TODO(b/188859752): deprecate distutils
 from distutils.command import build
 
 import platform
+import shutil
 import subprocess
 
 from setuptools import Command
-from setuptools import find_packages
 from setuptools import setup
 
 REQUIRED_PACKAGES = [
@@ -80,9 +80,9 @@ class _BazelBuildCommand(Command):
 
   def finalize_options(self):
     # verified with bazel 2.0.0, 3.0.0, and 4.0.0 via bazelisk
-    self._bazel_cmd = spawn.find_executable('bazel')
+    self._bazel_cmd = shutil.which('bazel')
     if not self._bazel_cmd:
-      self._bazel_cmd = spawn.find_executable('bazelisk')
+      self._bazel_cmd = shutil.which('bazelisk')
     if not self._bazel_cmd:
       raise RuntimeError(
           'Could not find "bazel" or "bazelisk" binary. Please visit '
@@ -109,7 +109,11 @@ setup(
     url='https://github.com/tensorflow/model-card-toolkit',
     author='Google LLC',
     author_email='tensorflow-extended-dev@googlegroups.com',
-    packages=find_packages(exclude=('bazel-model_card_toolkit*',)),
+    packages=[
+        'model_card_toolkit', 'model_card_toolkit.documentation',
+        'model_card_toolkit.documentation.examples', 'model_card_toolkit.proto',
+        'model_card_toolkit.utils'
+    ],
     package_data={
         'model_card_toolkit': ['schema/**/*.json', 'template/**/*.jinja']
     },
