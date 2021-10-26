@@ -5,8 +5,13 @@
 ## Major Features and Improvements
 
 * `ModelCard.from_json()` added.
+* Added `model_card_toolkit.utils.tfx_util.annotate_eval_result_metrics()`. This function appends `PerformanceMetrics` to a `ModelCard` based on a `tfma.EvalResult`.
+* Added `ConfidenceInterval` class for `PerformanceMetric`s.
+* Add `model_card.model_details.path` field.
 
 ## Bug fixes and other changes
+
+* `model_card.quantitative_analysis.performance_metrics` is now populated when a `tfma.EvalResult` is found in MLMD store.
 
 ## Breaking changes and Deprecations
 

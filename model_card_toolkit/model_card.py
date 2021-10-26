@@ -134,6 +134,7 @@ class ModelDetails(BaseModelCardField):
       may be useful to your audience.
     citations: How should the model be cited? If the model is based on published
       academic research, cite the research.
+    path: The path where the model is stored.
   """
   name: Optional[Text] = None
   overview: Optional[Text] = None
@@ -143,6 +144,7 @@ class ModelDetails(BaseModelCardField):
   licenses: List[License] = dataclasses.field(default_factory=list)
   references: List[Reference] = dataclasses.field(default_factory=list)
   citations: List[Citation] = dataclasses.field(default_factory=list)
+  path: Optional[Text] = None
 
   _proto_type: dataclasses.InitVar[type(
       model_card_pb2.ModelDetails)] = model_card_pb2.ModelDetails
@@ -259,6 +261,21 @@ class ModelParameters(BaseModelCardField):
 
 
 @dataclasses.dataclass
+class ConfidenceInterval(BaseModelCardField):
+  """The confidence interval of the metric.
+
+  Attributes:
+    lower_bound: The lower bound of the performance metric.
+    upper_bound: The upper bound of the performance metric.
+  """
+  lower_bound: Optional[Text] = None
+  upper_bound: Optional[Text] = None
+
+  _proto_type: dataclasses.InitVar[BaseModelCardField._get_type(
+      model_card_pb2.ConfidenceInterval)] = model_card_pb2.ConfidenceInterval
+
+
+@dataclasses.dataclass
 class PerformanceMetric(BaseModelCardField):
   """The details of the performance metric.
 
@@ -266,11 +283,13 @@ class PerformanceMetric(BaseModelCardField):
     type: What performance metric are you reporting on?
     value: What is the value of this performance metric?
     slice: What slice of your data was this metric computed on?
+    confidence_interval: The confidence interval of the metric.
   """
-  # The following fields are EXPERIMENTAL and introduced for migration purpose.
   type: Optional[Text] = None
   value: Optional[Text] = None
   slice: Optional[Text] = None
+  confidence_interval: ConfidenceInterval = dataclasses.field(
+      default_factory=ConfidenceInterval)
 
   _proto_type: dataclasses.InitVar[BaseModelCardField._get_type(
       model_card_pb2.PerformanceMetric)] = model_card_pb2.PerformanceMetric
