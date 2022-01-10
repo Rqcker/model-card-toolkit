@@ -17,10 +17,11 @@ The Model Card Toolkit (MCT) provides a set of utilities to generate Model Cards
 from trained models, evaluations, and datasets in ML pipelines.
 """
 
+import logging
 import os
 import pkgutil
 import tempfile
-from typing import Optional, Text
+from typing import Optional, Union
 
 from absl import logging
 import jinja2
@@ -28,9 +29,9 @@ import jinja2
 from model_card_toolkit.model_card import ModelCard
 from model_card_toolkit.proto import model_card_pb2
 from model_card_toolkit.utils import graphics
+from model_card_toolkit.utils import source as src
 from model_card_toolkit.utils import tfx_util
-
-import ml_metadata as mlmd
+import tensorflow_model_analysis as tfma
 
 # Constants about provided UI templates.
 _UI_TEMPLATES = (
@@ -88,11 +89,12 @@ class ModelCardToolkit():
   ```
   """
 
-  # TODO(b/188707257): combine mlmd_store and model_uri args
-  def __init__(self,
-               output_dir: Optional[Text] = None,
-               mlmd_store: Optional[mlmd.MetadataStore] = None,
-               model_uri: Optional[Text] = None):
+  def __init__(
+      self,
+      output_dir: Optional[str] = None,
+      mlmd_source: Optional[src.MlmdSource] = None,
+      source: Optional[src.Source] = None,
+  ):
     """Initializes the ModelCardToolkit.
 
     This function does not generate any assets by itself. Use the other API
@@ -102,95 +104,196 @@ class ModelCardToolkit():
     Args:
       output_dir: The path where MCT assets (such as data files and model cards)
         are written to. If not provided, a temp directory is used.
-      mlmd_store: A ml-metadata MetadataStore to retrieve metadata and lineage
-        information about the model stored at `model_uri`. If given, a set of
-        model card properties can be auto-populated from the `mlmd_store`.
-      model_uri: The path to the trained model to generate model cards. Ignored
-        if mlmd_store is not used.
+      mlmd_source: The ML Metadata Store to retrieve metadata and lineage
+        information about the model. If given, a set of model card properties
+        can be auto-populated from the `store`.
+      source: A collection of sources to extract data for a model card. This can
+        be used instead of `mlmd_source`, or alongside it. Useful when using
+        tools like TensorFlow Model Analysis and Data Validation without writing
+        to a MLMD store.
 
     Raises:
-      ValueError: If `mlmd_store` is given and the `model_uri` cannot be
-        resolved as a model artifact in the metadata store.
+      ValueError: If a model cannot be found at mlmd_source.model_uri.
     """
+
     self.output_dir = output_dir or tempfile.mkdtemp()
     self._mcta_proto_file = os.path.join(self.output_dir, _MCTA_PROTO_FILE)
     self._mcta_template_dir = os.path.join(self.output_dir, _MCTA_TEMPLATE_DIR)
     self._model_cards_dir = os.path.join(self.output_dir, _MODEL_CARDS_DIR)
+    self._source = source
+    self._store = None
+    self._artifact_with_model_uri = None
+    if mlmd_source:
+      self._process_mlmd_source(mlmd_source)
 
-    # if mlmd_store and model_uri are both set, use them
-    self._store = mlmd_store
-    if mlmd_store and model_uri:
-      models = self._store.get_artifacts_by_uri(model_uri)
-      if not models:
-        raise ValueError(f'"{model_uri}" cannot be found in the `mlmd_store`.')
-      if len(models) > 1:
-        logging.info(
-            '%d artifacts are found with the `model_uri`="%s". '
-            'The last one is used.', len(models), model_uri)
-      self._artifact_with_model_uri = models[-1]
-    elif mlmd_store and not model_uri:
-      raise ValueError('If `mlmd_store` is set, `model_uri` should be set.')
-    elif model_uri and not mlmd_store:
-      logging.info('`model_uri` ignored when `mlmd_store` is not set.')
+  def _process_mlmd_source(self, mlmd_source: src.MlmdSource) -> None:
+    """Process the MLMD source.
 
-  def _jinja_loader(self, template_dir: Text):
+    This gets the MLMD store, and the artifact corresponding to model_uri.
+
+    Args:
+      mlmd_source: The ML Metadata Store to retrieve metadata and lineage
+        information about the model.
+
+    Raises:
+      ValueError: If a model cannot be found at mlmd_source.model_uri.
+    """
+    self._store = mlmd_source.store
+    models = self._store.get_artifacts_by_uri(mlmd_source.model_uri)
+    if not models:
+      raise ValueError(
+          f'"{mlmd_source.model_uri}" cannot be found in the `store`.')
+    if len(models) > 1:
+      logging.info(
+          '%d artifacts are found with the `model_uri`="%s". '
+          'The last one is used.', len(models), mlmd_source.model_uri)
+    self._artifact_with_model_uri = models[-1]
+
+  def _jinja_loader(self, template_dir: str) -> jinja2.FileSystemLoader:
     return jinja2.FileSystemLoader(template_dir)
 
-  def _write_file(self, path: Text, content: Text) -> None:
+  def _write_file(self, path: str, content: str) -> None:
     """Write content to the path."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, 'w+') as f:
       f.write(content)
 
-  def _write_proto_file(self, path: Text, model_card: ModelCard) -> None:
+  def _write_proto_file(
+      self, path: str, model_card: Union[ModelCard,
+                                         model_card_pb2.ModelCard]) -> None:
     """Write serialized model card proto to the path."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, 'wb') as f:
-      f.write(model_card.to_proto().SerializeToString())
+      if isinstance(model_card, ModelCard):
+        f.write(model_card.to_proto().SerializeToString())
+      else:
+        f.write(model_card.SerializeToString())
 
-  def _read_proto_file(self, path: Text) -> ModelCard:
+  def _read_proto_file(self, path: str) -> Optional[ModelCard]:
     """Read serialized model card proto from the path."""
+    if not os.path.exists(path):
+      return None
     model_card_proto = model_card_pb2.ModelCard()
     with open(path, 'rb') as f:
       model_card_proto.ParseFromString(f.read())
     return ModelCard().copy_from_proto(model_card_proto)
 
+  def _annotate_eval_results(self, model_card: ModelCard) -> ModelCard:
+    """Annotates a model card with info from TFMA evaluation results.
+
+    The eval results are annotated as PerformanceMetrics in the model_card.
+    Graphics are also generated and appended to the QuantitativeAnalysis
+    section.
+
+    EvalResults are read from both TfmaSource or MlmdSource, whichever is
+    provided. Using both may cause duplicates to be recorded. If neither is
+    provided, this function will be a no-op.
+
+    Args:
+      model_card: The model card object to annotate with TFMA EvalResult
+        metrics.
+
+    Returns:
+      The model_card with eval result metrics annotated.
+    """
+    if self._source and self._source.tfma:
+      for eval_result_path in self._source.tfma.eval_result_paths:
+        eval_result = tfma.load_eval_result(
+            output_path=eval_result_path,
+            output_file_format=self._source.tfma.file_format)
+        if eval_result:
+          logging.info('EvalResult found at path %s', eval_result_path)
+          if self._source.tfma.metrics_include or self._source.tfma.metrics_exclude:
+            eval_result = tfx_util.filter_metrics(
+                eval_result, self._source.tfma.metrics_include,
+                self._source.tfma.metrics_exclude)
+          tfx_util.annotate_eval_result_metrics(model_card, eval_result)
+          graphics.annotate_eval_result_plots(model_card, eval_result)
+        else:
+          logging.info('EvalResult not found at path %s', eval_result_path)
+    if self._store:
+      metrics_artifacts = tfx_util.get_metrics_artifacts_for_model(
+          self._store, self._artifact_with_model_uri.id)
+      for metrics_artifact in metrics_artifacts:
+        eval_result = tfx_util.read_metrics_eval_result(metrics_artifact.uri)
+        if eval_result is not None:
+          tfx_util.annotate_eval_result_metrics(model_card, eval_result)
+          graphics.annotate_eval_result_plots(model_card, eval_result)
+    return model_card
+
+  def _annotate_dataset_statistics(self, model_card: ModelCard) -> ModelCard:
+    """Annotates a model card with info from TFDV dataset statistics.
+
+    Graphics for the dataset statistics are generated and appended to the
+    Dataset section.
+
+    Dataset statistics are read from both TfdvSource or MlmdSource, whichever is
+    provided. Using both may cause duplicates to be recorded. If neither is
+    provided, this function will be a no-op.
+
+    Args:
+      model_card: The model card object to annotate with TFDV dataset
+        statistics.
+
+    Returns:
+      The model_card with dataset statistics annotated.
+    """
+    if self._source and self._source.tfdv:
+      for dataset_stats_path in self._source.tfdv.dataset_statistics_paths:
+        if self._source.tfdv.features_include or self._source.tfdv.features_exclude:
+          data_stats = tfx_util.read_stats_protos_and_filter_features(
+              dataset_stats_path, self._source.tfdv.features_include,
+              self._source.tfdv.features_exclude)
+        else:
+          data_stats = tfx_util.read_stats_protos(dataset_stats_path)
+        graphics.annotate_dataset_feature_statistics_plots(
+            model_card, data_stats)
+    if self._store:
+      stats_artifacts = tfx_util.get_stats_artifacts_for_model(
+          self._store, self._artifact_with_model_uri.id)
+      for stats_artifact in stats_artifacts:
+        data_stats = tfx_util.read_stats_protos(stats_artifact.uri)
+        graphics.annotate_dataset_feature_statistics_plots(
+            model_card, data_stats)
+    return model_card
+
+  def _annotate_model(self, model_card: ModelCard) -> ModelCard:
+    """Annotates a model card with info from ModelSource.
+
+    The `PushedModel` path (either provided directly via `pushed_model_path`, or
+    through a TFX Artifact via `pushed_model_artifact`) is used to populate the
+    ModelCard's `model_details.path` field.
+
+    Args:
+      model_card: The model card object to annotate with model info.
+
+    Returns:
+      The model_card with model info annotated.
+    """
+    if self._source and self._source.model:
+      model_card.model_details.path = self._source.model.pushed_model_path
+    return model_card
+
   def _scaffold_model_card(self) -> ModelCard:
     """Generates the ModelCard for scaffold_assets().
 
+    If Source is provided, pre-populate ModelCard fields with data from Source.
     If MLMD store is provided, pre-populate ModelCard fields with data from
-    MLMD. See `model_card_toolkit.utils.tfx_util` documentation for more
-    details.
+    MLMD. See `model_card_toolkit.utils.tfx_util` and
+    `model_card_toolkit.utils.graphics` documentation for more details.
 
     Returns:
       A ModelCard representing the given model.
     """
-    if not self._store:
-      return ModelCard()
-
     # Pre-populate ModelCard fields
-    model_card = tfx_util.generate_model_card_for_model(
-        self._store, self._artifact_with_model_uri.id)
-
-    # Generate graphics for TFMA's `EvalResult`s
-    metrics_artifacts = tfx_util.get_metrics_artifacts_for_model(
-        self._store, self._artifact_with_model_uri.id)
-    for metrics_artifact in metrics_artifacts:
-      eval_result = tfx_util.read_metrics_eval_result(metrics_artifact.uri)
-      if eval_result is not None:
-        tfx_util.annotate_eval_result_metrics(model_card, eval_result)
-        graphics.annotate_eval_result_plots(model_card, eval_result)
-
-    # Generate graphics for TFDV's `DatasetFeatureStatisticsList`s
-    stats_artifacts = tfx_util.get_stats_artifacts_for_model(
-        self._store, self._artifact_with_model_uri.id)
-    for stats_artifact in stats_artifacts:
-      train_stats = tfx_util.read_stats_proto(stats_artifact.uri,
-                                              'Split-train')
-      eval_stats = tfx_util.read_stats_proto(stats_artifact.uri, 'Split-eval')
-      graphics.annotate_dataset_feature_statistics_plots(
-          model_card, [train_stats, eval_stats])
-
+    if self._store:
+      model_card = tfx_util.generate_model_card_for_model(
+          self._store, self._artifact_with_model_uri.id)
+    else:
+      model_card = ModelCard()
+    model_card = self._annotate_eval_results(model_card)
+    model_card = self._annotate_dataset_statistics(model_card)
+    model_card = self._annotate_model(model_card)
     return model_card
 
   def scaffold_assets(self) -> ModelCard:
@@ -230,7 +333,8 @@ class ModelCardToolkit():
 
     return model_card
 
-  def update_model_card(self, model_card: ModelCard) -> None:
+  def update_model_card(
+      self, model_card: Union[ModelCard, model_card_pb2.ModelCard]) -> None:
     """Updates the Proto file in the MCT assets directory.
 
     Args:
@@ -242,9 +346,10 @@ class ModelCardToolkit():
     self._write_proto_file(self._mcta_proto_file, model_card)
 
   def export_format(self,
-                    model_card: Optional[ModelCard] = None,
-                    template_path: Optional[Text] = None,
-                    output_file=_DEFAULT_MODEL_CARD_FILE_NAME) -> Text:
+                    model_card: Optional[Union[
+                        ModelCard, model_card_pb2.ModelCard]] = None,
+                    template_path: Optional[str] = None,
+                    output_file=_DEFAULT_MODEL_CARD_FILE_NAME) -> str:
     """Generates a model card document based on the MCT assets.
 
     The model card document is both returned by this function, as well as saved
@@ -264,7 +369,7 @@ class ModelCardToolkit():
       The model card file content.
 
     Raises:
-      MCTError: If `export_format` is called before `scaffold_assets` has
+      ValueError: If `export_format` is called before `scaffold_assets` has
         generated model card assets.
     """
     if not template_path:
@@ -277,12 +382,11 @@ class ModelCardToolkit():
     if model_card:
       self.update_model_card(model_card)
     # If model_card is not passed in, read from Proto file.
-    elif os.path.exists(self._mcta_proto_file):
-      model_card = self._read_proto_file(self._mcta_proto_file)
-    # If model card proto never created, raise exception.
     else:
-      raise ValueError(
-          'scaffold_assets() must be called before export_format().')
+      model_card = self._read_proto_file(self._mcta_proto_file)
+      if not model_card:
+        raise ValueError('model_card could not be found. '
+                         'Call scaffold_assets() to generate model_card.')
 
     # Generate Model Card.
     jinja_env = jinja2.Environment(
