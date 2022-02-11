@@ -21,7 +21,7 @@ import logging
 import os
 import pkgutil
 import tempfile
-from typing import Optional, Union
+from typing import Any, Dict, Optional, Union
 
 from absl import logging
 import jinja2
@@ -31,6 +31,7 @@ from model_card_toolkit.proto import model_card_pb2
 from model_card_toolkit.utils import graphics
 from model_card_toolkit.utils import source as src
 from model_card_toolkit.utils import tfx_util
+
 import tensorflow_model_analysis as tfma
 
 # Constants about provided UI templates.
@@ -121,6 +122,8 @@ class ModelCardToolkit():
     self._mcta_template_dir = os.path.join(self.output_dir, _MCTA_TEMPLATE_DIR)
     self._model_cards_dir = os.path.join(self.output_dir, _MODEL_CARDS_DIR)
     self._source = source
+
+    # set in _process_mlmd_source()
     self._store = None
     self._artifact_with_model_uri = None
     if mlmd_source:
@@ -296,7 +299,9 @@ class ModelCardToolkit():
     model_card = self._annotate_model(model_card)
     return model_card
 
-  def scaffold_assets(self) -> ModelCard:
+  def scaffold_assets(self,
+                      json: Optional[Union[Dict[str, Any],
+                                           str]] = None) -> ModelCard:
     """Generates the Model Card Tookit assets.
 
     Assets include the ModelCard proto file, Model Card document, and jinja
@@ -305,9 +310,15 @@ class ModelCardToolkit():
 
     An assets directory is created if one does not already exist.
 
-    If the MCT is initialized with a `mlmd_store`, it further auto-populates
-    the model cards properties as well as generating related plots such as model
-    performance and data distributions.
+    If the MCT is initialized with a `mlmd_source`, it further auto-populates
+    ModelCard properties and generates plots for model performance and data
+    distributions. The ModelCard is saved as an Artifact to the `mlmd_source`.
+
+    Args:
+      json: An optional JSON object which can be used to populate fields in the
+        model card. This can be provided as either a dictionary or a string. If
+        provided, any fields used here will overwrite fields populated by
+        `mlmd_source`.
 
     Returns:
       A ModelCard representing the given model.
@@ -318,6 +329,8 @@ class ModelCardToolkit():
 
     # Generate ModelCard.
     model_card = self._scaffold_model_card()
+    if json:
+      model_card.merge_from_json(json)
 
     # Write Proto file.
     self._write_proto_file(self._mcta_proto_file, model_card)
@@ -349,7 +362,7 @@ class ModelCardToolkit():
                     model_card: Optional[Union[
                         ModelCard, model_card_pb2.ModelCard]] = None,
                     template_path: Optional[str] = None,
-                    output_file=_DEFAULT_MODEL_CARD_FILE_NAME) -> str:
+                    output_file: Optional[str] = None) -> str:
     """Generates a model card document based on the MCT assets.
 
     The model card document is both returned by this function, as well as saved
@@ -377,6 +390,8 @@ class ModelCardToolkit():
                                    _DEFAULT_UI_TEMPLATE_FILE)
     template_dir = os.path.dirname(template_path)
     template_file = os.path.basename(template_path)
+    if not output_file:
+      output_file = _DEFAULT_MODEL_CARD_FILE_NAME
 
     # If model_card is passed in, write to Proto file.
     if model_card:
@@ -405,7 +420,3 @@ class ModelCardToolkit():
     mode_card_file_path = os.path.join(self._model_cards_dir, output_file)
     self._write_file(mode_card_file_path, model_card_file_content)
     return model_card_file_content
-
-  def save_mlmd(self) -> None:
-    """Saves the model card of the model artifact with `model_uri` to MLMD."""
-    pass
