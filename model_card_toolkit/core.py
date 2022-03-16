@@ -17,7 +17,6 @@ The Model Card Toolkit (MCT) provides a set of utilities to generate Model Cards
 from trained models, evaluations, and datasets in ML pipelines.
 """
 
-import logging
 import os
 import pkgutil
 import tempfile
@@ -69,14 +68,14 @@ class ModelCardToolkit():
   incrementally via its API.
 
 
-  Example usage:
+  Standard workflow:
 
   ```python
   import model_card_toolkit
 
   # Initialize the Model Card Toolkit with a path to store generate assets
-  model_card_output_path = ...
-  mct = model_card_toolkit.ModelCardToolkit(model_card_output_path)
+  model_card_dir_path = ...
+  mct = model_card_toolkit.ModelCardToolkit(model_card_dir_path)
 
   # Initialize the ModelCard, which can be freely populated
   model_card = mct.scaffold_assets()
@@ -120,6 +119,8 @@ class ModelCardToolkit():
     self.output_dir = output_dir or tempfile.mkdtemp()
     self._mcta_proto_file = os.path.join(self.output_dir, _MCTA_PROTO_FILE)
     self._mcta_template_dir = os.path.join(self.output_dir, _MCTA_TEMPLATE_DIR)
+    self.default_template = os.path.join(self._mcta_template_dir,
+                                         _DEFAULT_UI_TEMPLATE_FILE)
     self._model_cards_dir = os.path.join(self.output_dir, _MODEL_CARDS_DIR)
     self._source = source
 
@@ -386,8 +387,7 @@ class ModelCardToolkit():
         generated model card assets.
     """
     if not template_path:
-      template_path = os.path.join(self._mcta_template_dir,
-                                   _DEFAULT_UI_TEMPLATE_FILE)
+      template_path = self.default_template
     template_dir = os.path.dirname(template_path)
     template_file = os.path.basename(template_path)
     if not output_file:
