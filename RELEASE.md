@@ -6,6 +6,16 @@
 
 ## Bug fixes and other changes
 
+* Remove `semantic-version` dependency.
+
+## Breaking changes and Deprecations
+
+# Release 1.3.1
+
+## Major Features and Improvements
+
+## Bug fixes and other changes
+
 * Fix bug where `ModelCardGenerator` fails if `template_io` is unspecified.
 
 ## Breaking changes and Deprecations
